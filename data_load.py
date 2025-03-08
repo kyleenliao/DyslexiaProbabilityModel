@@ -1,13 +1,39 @@
 import os
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy.stats import pointbiserialr
 from sklearn.naive_bayes import GaussianNB
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, brier_score_loss
-from scipy.stats import beta, norm, bootstrap
+from sklearn.metrics import accuracy_score, brier_score_loss
+from scipy.stats import norm
+from sklearn.linear_model import LogisticRegression
+from sklearn.dummy import DummyClassifier
 
+def plot_model_performance(results):
+    model_names = list(results.keys())
+    accuracies = [results[model]['Test Accuracy'] for model in model_names]
+    brier_scores = [results[model]['Test Brier Score'] for model in model_names]
+    fairness = [abs(results[model]['Male Test Accuracy']-results[model]['Female Test Accuracy']) for model in model_names]
 
+    fig, ax = plt.subplots(figsize=(10, 5))
+    width = 0.3
+    x = np.arange(len(model_names))
+    
+    ax.bar(x - width, accuracies, width, label='Test Accuracy')
+    ax.bar(x, brier_scores, width, label='Test Brier Score')
+    ax.bar(x + width, fairness, width, label='Test Fairness Score')
+    
+    ax.set_xticks(x)
+    ax.set_xticklabels(model_names)
+    ax.set_xlabel("Model")
+    ax.set_ylabel("Score")
+    ax.set_title("Model Performance Comparison")
+    ax.legend()
+    
+    plt.show()
+    
 def compute_features(Lx, Ly, Rx, Ry, threshold_fixation=0.3, threshold_saccade=1.0):    
     time = np.arange(1, len(Lx) + 1)
                     
@@ -45,23 +71,6 @@ def clean(arr):
         arr[i] = float(arr[i].replace(",", "."))
     return arr
 
-def naiveBayes(X, y):
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # Train Naïve Bayes model
-    nb_model = GaussianNB()
-    nb_model.fit(X_train, y_train)
-
-    # Predict probabilities and classes
-    y_pred = nb_model.predict(X_test)
-    y_prob = nb_model.predict_proba(X_test)[:, 1]  # Probability of being dyslexic
-
-    # Evaluate
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"Accuracy: {accuracy:.4f}")
-    print("Classification Report:\n", classification_report(y_test, y_pred))
-
 def bayesian_probabilities(X, y):
     """Compute posterior probabilities using Bayes' Theorem explicitly."""
     prior_prob = y.mean()  # P(dyslexia)
@@ -93,6 +102,57 @@ def bayesian_probabilities(X, y):
         return np.mean(posteriors)  # Average probability across features
 
     return X.apply(compute_posterior, axis=1)
+
+def train_models(X, y, genders):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    male_mask = (genders == "male").values
+    female_mask = (genders == "female").values
+    X_train_male, X_test_male, y_train_male, y_test_male = train_test_split(X[male_mask], y[male_mask], test_size=0.2, random_state=42)
+    X_train_female, X_test_female, y_train_female, y_test_female = train_test_split(X[female_mask], y[female_mask], test_size=0.2, random_state=42)
+
+    models = {
+        "Naive Bayes": GaussianNB(),
+        "Logistic Regression": LogisticRegression(),
+        "Dummy Classifier": DummyClassifier(strategy="most_frequent")
+    }
+
+    results = {}
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_train_pred = model.predict(X_train)
+        y_test_pred = model.predict(X_test)
+        y_train_prob = model.predict_proba(X_train)[:, 1] if hasattr(model, "predict_proba") else np.zeros_like(y_train_pred)
+        y_test_prob = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else np.zeros_like(y_test_pred)
+        
+        train_accuracy = accuracy_score(y_train, y_train_pred)
+        test_accuracy = accuracy_score(y_test, y_test_pred)
+        train_brier = brier_score_loss(y_train, y_train_prob)
+        test_brier = brier_score_loss(y_test, y_test_prob)
+        
+        # Fairness analysis
+        y_train_pred_male = model.predict(X_train_male)
+        y_test_pred_male = model.predict(X_test_male)
+        y_train_pred_female = model.predict(X_train_female)
+        y_test_pred_female = model.predict(X_test_female)
+        
+        train_accuracy_male = accuracy_score(y_train_male, y_train_pred_male)
+        test_accuracy_male = accuracy_score(y_test_male, y_test_pred_male)
+        train_accuracy_female = accuracy_score(y_train_female, y_train_pred_female)
+        test_accuracy_female = accuracy_score(y_test_female, y_test_pred_female)
+        
+        results[name] = {
+            "Train Accuracy": train_accuracy,
+            "Test Accuracy": test_accuracy,
+            "Train Brier Score": train_brier,
+            "Test Brier Score": test_brier,
+            "Male Train Accuracy": train_accuracy_male,
+            "Female Train Accuracy": train_accuracy_female,
+            "Male Test Accuracy": test_accuracy_male,
+            "Female Test Accuracy": test_accuracy_female,
+            "Calibration":test_accuracy_male/test_accuracy_female
+        }
+    
+    return results
 
 def main():
     # Define the root folder where all subject folders are located
@@ -138,13 +198,11 @@ def main():
                 
                 # Add subject metadata to the DataFrame
                 subject_data = {
-                    #"Subject_ID": folder_name,
                     "Reading_Status": reading_status,
-                    #"Gender": gender,
+                    "Gender": gender,
                     'Median_Acceleration': median_accel,
                     'Avg_Disparity': avg_disparity,
                     'Fixation_Count': fixation_count,
-                    #'Fixation_Duration': fixation_duration,
                     'Avg_Saccade_Length': avg_saccade_length,
                     'Regression_Rate': regression_rate
                 }
@@ -156,9 +214,7 @@ def main():
     final_df = pd.DataFrame(all_data)
     final_df['Reading_Status_Binary'] = final_df['Reading_Status'].map({"control": 0, "reading_disabled": 1})
     
-    features = ['Median_Acceleration', 'Avg_Disparity', 'Fixation_Count', 
-            #'Fixation_Duration', 
-            'Avg_Saccade_Length', 'Regression_Rate']
+    features = ['Median_Acceleration', 'Avg_Disparity', 'Fixation_Count', 'Avg_Saccade_Length', 'Regression_Rate']
 
     correlations = {feat: pointbiserialr(final_df[feat], final_df['Reading_Status_Binary'])[0] for feat in features}
     correlation_df = pd.DataFrame(list(correlations.items()), columns=['Feature', 'Correlation'])
@@ -167,22 +223,25 @@ def main():
     final_df = final_df.drop("Reading_Status", axis=1)
         
     y = final_df["Reading_Status_Binary"]
-    X = final_df.drop("Reading_Status_Binary", axis=1)
+    genders = final_df["Gender"]
+    X = final_df.drop(["Reading_Status_Binary", "Gender"], axis=1)
     
-    naiveBayes(X,y)
-    
-    posterior_probs = bayesian_probabilities(X, y)
-    print("Posterior Probabilities:")
-    print(posterior_probs)
-    
-    brier = brier_score_loss(y, posterior_probs)
-    print(f"Brier Score: {brier:.4f}")
-    
-    threshold = 0.5  
-    predictions = (posterior_probs > threshold).astype(int)
-    # Compute accuracy
-    accuracy = accuracy_score(y, predictions)
-    print(f"Accuracy: {accuracy:.4f}")
+    results = train_models(X, y, genders)
+    for model_name, metrics in results.items():
+        print(f"{model_name} Results:")
+        print(f"Train Accuracy: {metrics['Train Accuracy']:.4f}")
+        print(f"Test Accuracy: {metrics['Test Accuracy']:.4f}")
+        print(f"Train Brier Score: {metrics['Train Brier Score']:.4f}")
+        print(f"Test Brier Score: {metrics['Test Brier Score']:.4f}")
+        print(f"Male Train Accuracy: {metrics['Male Train Accuracy']}")
+        print(f"Female Train Accuracy: {metrics['Female Train Accuracy']}")
+        print(f"Male Test Accuracy: {metrics['Male Test Accuracy']}")
+        print(f"Female Test Accuracy: {metrics['Female Test Accuracy']}")
+        print(f"Train Male Female Diff: {abs(metrics['Male Train Accuracy']-metrics['Female Train Accuracy'])}")
+        print(f"Calibration: {metrics['Calibration']}")
+        print()
 
+    plot_model_performance(results)
+    
 if __name__ == '__main__':
     main()
